@@ -34,7 +34,7 @@ class MainWindow(QMainWindow):
         super().__init__()
 
         # Initialize instance attributes
-        self.image_mounted = False
+        self.image_loaded = False
         self.current_offset = None
         self.current_image_path = None
         self.image_handler = None
@@ -50,7 +50,10 @@ class MainWindow(QMainWindow):
                                                                                                                "Image "
                                                                                                                "Operation",
                                                                                                                message),
-                setattr(self, "image_mounted", not self.image_mounted) if success else None)[1])
+                setattr(self, "image_loaded", not self.image_loaded) if success else None)[1])
+        
+        # Connect to the imageLoaded signal to populate tree from dfvfs
+        self.image_manager.imageLoaded.connect(self.load_volumes_from_vfs)
 
         # # Load existing API keys
         self.api_keys = configparser.ConfigParser()
@@ -73,8 +76,8 @@ class MainWindow(QMainWindow):
         file_actions = {
             'Add Evidence File': self.load_image_evidence,
             'Remove Evidence File': self.remove_image_evidence,
-            'Image Mounting': self.image_manager.mount_image,
-            'Image Unmounting': self.image_manager.dismount_image,
+            'Load Image': self.image_manager.load_image,
+            'Unload Image': self.image_manager.unload_image,
             'separator': None,  # This will add a separator
             'Exit': self.close
         }
@@ -158,7 +161,7 @@ class MainWindow(QMainWindow):
 
         # add load image button to the toolbar
         load_image_action = QAction(QIcon('Icons/icons8-evidence-48.png'), "Load Image", self)
-        load_image_action.triggered.connect(self.load_image_evidence)
+        load_image_action.triggered.connect(self.image_manager.load_image)
         self.main_toolbar.addAction(load_image_action)
 
         # add remove image button to the toolbar
@@ -177,16 +180,16 @@ class MainWindow(QMainWindow):
         # add the separator
         self.main_toolbar.addSeparator()
 
-        # Initialize and add the mount image action
-        self.mount_image_button = QAction(QIcon('Icons/devices/icons8-hard-disk-48.png'), "Mount Image", self)
-        self.mount_image_button.triggered.connect(self.image_manager.mount_image)
-        self.main_toolbar.addAction(self.mount_image_button)
+        # Initialize and add the load image action
+        self.load_image_button = QAction(QIcon('Icons/devices/icons8-hard-disk-48.png'), "Load Image", self)
+        self.load_image_button.triggered.connect(self.image_manager.load_image)
+        self.main_toolbar.addAction(self.load_image_button)
 
-        # Initialize and add the unmount image action
-        self.unmount_image_button = QAction(QIcon('Icons/devices/icons8-hard-disk-48_red.png'), "Unmount Image",
+        # Initialize and add the unload image action
+        self.unload_image_button = QAction(QIcon('Icons/devices/icons8-hard-disk-48_red.png'), "Unload Image",
                                             self)
-        self.unmount_image_button.triggered.connect(self.image_manager.dismount_image)
-        self.main_toolbar.addAction(self.unmount_image_button)
+        self.unload_image_button.triggered.connect(self.image_manager.unload_image)
+        self.main_toolbar.addAction(self.unload_image_button)
 
         self.addToolBar(Qt.TopToolBarArea, self.main_toolbar)
 
@@ -432,7 +435,7 @@ class MainWindow(QMainWindow):
         self.clear_viewers()
         self.current_image_path = None
         self.current_offset = None
-        self.image_mounted = False
+        self.image_loaded = False
         self.file_search_widget.clear()
         self.evidence_files.clear()
         self.deleted_files_widget.clear()
@@ -451,15 +454,15 @@ class MainWindow(QMainWindow):
                                      QMessageBox.StandardButton.No)
 
         if reply == QMessageBox.StandardButton.Yes:
-            if self.image_mounted:
-                dismount_reply = QMessageBox.question(self, 'Dismount Image',
-                                                      'Do you want to dismount the mounted image before exiting?',
+            if self.image_loaded:
+                unload_reply = QMessageBox.question(self, 'Unload Image',
+                                                      'Do you want to unload the image before exiting?',
                                                       QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                                                       QMessageBox.StandardButton.Yes)
 
-                if dismount_reply == QMessageBox.StandardButton.Yes:
-                    # Assuming you have a method to dismount the image
-                    self.image_manager.dismount_image()
+                if unload_reply == QMessageBox.StandardButton.Yes:
+                    # Assuming you have a method to unload the image
+                    self.image_manager.unload_image()
 
             event.accept()
         else:
@@ -495,6 +498,153 @@ class MainWindow(QMainWindow):
             self.metadata_viewer.image_handler = self.image_handler
 
             self.enable_tabs(True)
+    
+    def load_volumes_from_vfs(self, vfs_manager):
+        """Load volumes and files from dfvfs VFS manager into the tree view."""
+        try:
+            # Clear existing tree
+            self.tree_viewer.clear()
+            
+            # Create root item for the image
+            root_item = self.create_tree_item(
+                self.tree_viewer, 
+                vfs_manager.file_name,
+                self.db_manager.get_icon_path('device', 'media-optical'),
+                {'vfs_manager': vfs_manager, 'file_entry': None}
+            )
+            
+            # Try to get volumes
+            volumes = vfs_manager.get_volumes()
+            print(f"DEBUG: Found {len(volumes)} volumes")
+            
+            if volumes:
+                # Add each volume as a child placeholder
+                for i, volume in enumerate(volumes):
+                    volume_text = f"Volume {i + 1}"
+                    print(f"DEBUG: Adding {volume_text}")
+                    volume_item = self.create_tree_item(
+                        root_item,
+                        volume_text,
+                        self.db_manager.get_icon_path('device', 'drive-harddisk'),
+                        {'vfs_manager': vfs_manager, 'volume': volume, 'file_entry': None}
+                    )
+                    volume_item.setChildIndicatorPolicy(QTreeWidgetItem.ShowIndicator)
+                root_item.setChildIndicatorPolicy(QTreeWidgetItem.ShowIndicator)
+            else:
+                # No volumes, try to add root filesystem directly
+                print("DEBUG: No volumes, trying root filesystem")
+                try:
+                    root_fs = vfs_manager.root_fs_object
+                    print(f"DEBUG: Root filesystem object: {root_fs}")
+                    print(f"DEBUG: Root filesystem type: {type(root_fs).__name__}")
+                    
+                    if root_fs:
+                        is_dir = root_fs.IsDirectory()
+                        print(f"DEBUG: IsDirectory result: {is_dir}")
+                        
+                        if is_dir:
+                            # Populate root filesystem entries
+                            entries = vfs_manager.list_directory_entries(root_fs)
+                            print(f"DEBUG: Found {len(entries)} root entries")
+                            for entry in entries:
+                                icon_key = 'folder' if entry['is_directory'] else entry['name'].split('.')[-1].lower() if '.' in entry['name'] else 'unknown'
+                                icon_path = self.db_manager.get_icon_path('folder' if entry['is_directory'] else 'file', icon_key)
+                                
+                                child_item = self.create_tree_item(
+                                    root_item,
+                                    entry['name'],
+                                    icon_path,
+                                    {'vfs_manager': vfs_manager, 'file_entry': entry['file_entry'], 'is_directory': entry['is_directory']}
+                                )
+                                
+                                if entry['is_directory']:
+                                    child_item.setChildIndicatorPolicy(QTreeWidgetItem.ShowIndicator)
+                            
+                            root_item.setChildIndicatorPolicy(QTreeWidgetItem.ShowIndicator)
+                        else:
+                            print(f"DEBUG: Root filesystem is not a directory, trying TSK partition detection")
+                            # For raw images, try wrapping with TSK to detect partitions
+                            try:
+                                from dfvfs.lib import definitions
+                                from dfvfs.path import factory as path_spec_factory
+                                from dfvfs.resolver import resolver
+                                from dfvfs.volume import factory as volume_system_factory
+                                
+                                # Create TSK path spec directly from compressed/raw data
+                                tsk_spec = path_spec_factory.Factory.NewPathSpec(
+                                    definitions.TYPE_INDICATOR_TSK_PARTITION,
+                                    parent=vfs_manager.path_spec
+                                )
+                                print(f"DEBUG: Created TSK path spec")
+                                
+                                # Try to open the volume system with TSK
+                                try:
+                                    vol_sys = volume_system_factory.Factory.NewVolumeSystem(tsk_spec)
+                                    print(f"DEBUG: TSK Volume system: {vol_sys}")
+                                    
+                                    if vol_sys:
+                                        vfs_manager.volume_system = vol_sys
+                                        volumes = list(vol_sys.volumes)
+                                        print(f"DEBUG: Found {len(volumes)} volumes via TSK")
+                                        
+                                        if volumes:
+                                            for i, volume in enumerate(volumes):
+                                                volume_text = f"Volume {i + 1}"
+                                                volume_item = self.create_tree_item(
+                                                    root_item,
+                                                    volume_text,
+                                                    self.db_manager.get_icon_path('device', 'drive-harddisk'),
+                                                    {'vfs_manager': vfs_manager, 'volume': volume, 'file_entry': None}
+                                                )
+                                                volume_item.setChildIndicatorPolicy(QTreeWidgetItem.ShowIndicator)
+                                            root_item.setChildIndicatorPolicy(QTreeWidgetItem.ShowIndicator)
+                                        else:
+                                            print(f"DEBUG: TSK found no volumes, trying direct filesystem")
+                                            raise Exception("No volumes found")
+                                except (KeyError, TypeError) as tsk_e:
+                                    print(f"DEBUG: TSK partition detection failed: {tsk_e}")
+                                    # If TSK fails, try to open the root filesystem directly from TSK spec
+                                    try:
+                                        tsk_fs = resolver.Resolver.OpenFileEntry(tsk_spec)
+                                        print(f"DEBUG: TSK file entry: {tsk_fs}")
+                                        
+                                        if tsk_fs and tsk_fs.IsDirectory():
+                                            vfs_manager.root_fs_object = tsk_fs
+                                            entries = vfs_manager.list_directory_entries(tsk_fs)
+                                            print(f"DEBUG: Found {len(entries)} entries from TSK")
+                                            for entry in entries:
+                                                icon_key = 'folder' if entry['is_directory'] else entry['name'].split('.')[-1].lower() if '.' in entry['name'] else 'unknown'
+                                                icon_path = self.db_manager.get_icon_path('folder' if entry['is_directory'] else 'file', icon_key)
+                                                
+                                                child_item = self.create_tree_item(
+                                                    root_item,
+                                                    entry['name'],
+                                                    icon_path,
+                                                    {'vfs_manager': vfs_manager, 'file_entry': entry['file_entry'], 'is_directory': entry['is_directory']}
+                                                )
+                                                
+                                                if entry['is_directory']:
+                                                    child_item.setChildIndicatorPolicy(QTreeWidgetItem.ShowIndicator)
+                                            
+                                            root_item.setChildIndicatorPolicy(QTreeWidgetItem.ShowIndicator)
+                                    except Exception as tsk_fs_e:
+                                        print(f"DEBUG: TSK filesystem failed: {tsk_fs_e}")
+                            except Exception as raw_e:
+                                print(f"DEBUG: TSK wrapping failed: {raw_e}")
+                                import traceback
+                                traceback.print_exc()
+                    else:
+                        print(f"DEBUG: Root filesystem is None")
+                except Exception as e:
+                    print(f"DEBUG: Error adding root filesystem: {e}")
+                    import traceback
+                    traceback.print_exc()
+            
+            self.enable_tabs(True)
+        except Exception as e:
+            print(f"Error loading volumes from VFS: {e}")
+            import traceback
+            traceback.print_exc()
 
     def remove_image_evidence(self):
         if not self.evidence_files:
@@ -638,7 +788,74 @@ class MainWindow(QMainWindow):
         if data is None:
             return
 
-        if data.get("inode_number") is None:  # It's a partition
+        # Handle dfvfs items
+        if 'vfs_manager' in data:
+            vfs_manager = data['vfs_manager']
+            file_entry = data.get('file_entry')
+            
+            if file_entry is None and 'volume' not in data:
+                # Root item - list root filesystem entries
+                try:
+                    entries = vfs_manager.list_directory_entries(vfs_manager.root_fs_object)
+                    for entry in entries:
+                        icon_key = 'folder' if entry['is_directory'] else entry['name'].split('.')[-1].lower() if '.' in entry['name'] else 'unknown'
+                        icon_path = self.db_manager.get_icon_path('folder' if entry['is_directory'] else 'file', icon_key)
+                        
+                        child_item = self.create_tree_item(
+                            item,
+                            entry['name'],
+                            icon_path,
+                            {'vfs_manager': vfs_manager, 'file_entry': entry['file_entry'], 'is_directory': entry['is_directory']}
+                        )
+                        
+                        if entry['is_directory']:
+                            child_item.setChildIndicatorPolicy(QTreeWidgetItem.ShowIndicator)
+                except Exception as e:
+                    print(f"Error listing root filesystem: {e}")
+            elif 'volume' in data:
+                # Volume item - list volume root entries
+                try:
+                    volume = data['volume']
+                    vfs_manager.get_root_filesystem(volume)
+                    entries = vfs_manager.list_directory_entries(vfs_manager.root_fs_object)
+                    
+                    for entry in entries:
+                        icon_key = 'folder' if entry['is_directory'] else entry['name'].split('.')[-1].lower() if '.' in entry['name'] else 'unknown'
+                        icon_path = self.db_manager.get_icon_path('folder' if entry['is_directory'] else 'file', icon_key)
+                        
+                        child_item = self.create_tree_item(
+                            item,
+                            entry['name'],
+                            icon_path,
+                            {'vfs_manager': vfs_manager, 'file_entry': entry['file_entry'], 'is_directory': entry['is_directory']}
+                        )
+                        
+                        if entry['is_directory']:
+                            child_item.setChildIndicatorPolicy(QTreeWidgetItem.ShowIndicator)
+                except Exception as e:
+                    print(f"Error listing volume entries: {e}")
+            elif file_entry:
+                # Directory item - list directory entries
+                try:
+                    entries = vfs_manager.list_directory_entries(file_entry)
+                    
+                    for entry in entries:
+                        icon_key = 'folder' if entry['is_directory'] else entry['name'].split('.')[-1].lower() if '.' in entry['name'] else 'unknown'
+                        icon_path = self.db_manager.get_icon_path('folder' if entry['is_directory'] else 'file', icon_key)
+                        
+                        child_item = self.create_tree_item(
+                            item,
+                            entry['name'],
+                            icon_path,
+                            {'vfs_manager': vfs_manager, 'file_entry': entry['file_entry'], 'is_directory': entry['is_directory']}
+                        )
+                        
+                        if entry['is_directory']:
+                            child_item.setChildIndicatorPolicy(QTreeWidgetItem.ShowIndicator)
+                except Exception as e:
+                    print(f"Error listing directory entries: {e}")
+        # Handle old ImageHandler items
+        elif data.get("inode_number") is None:  # It's a partition
             self.populate_contents(item, data)
         else:  # It's a directory
             self.populate_contents(item, data, data.get("inode_number"))
